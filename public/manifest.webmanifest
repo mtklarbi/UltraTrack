@@ -1,0 +1,23 @@
+{
+  "name": "SemDiff",
+  "short_name": "SemDiff",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0ea5e9",
+  "icons": [
+    {
+      "src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMAAAADAAQMAAABJ9X8VAAAABlBMVEUAwK3///9R0v9HAAAAM0lEQVQYGe3BsQkAMAgEwdb/0bQhKxJvKQk7JkA6o0A3O6SYv8wzCqoAVgR8b7yYwYQwQYQwQYQwQYQwQYQwYYMBybqCz8bP3wAAAABJRU5ErkJggg==",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAMAAADzG3bRAAAABlBMVEUAwK3///9R0v9HAAAADElEQVQImWNgoBAwAAABAAEAc1MqJQAAAABJRU5ErkJggg==",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

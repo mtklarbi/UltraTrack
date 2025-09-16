@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* App base styles */
+:root {
+  --header-height: 3.5rem;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+.app-container {
+  min-height: 100%;
+  display: grid;
+  grid-template-rows: var(--header-height) 1fr;
+}
+
+.app-header {
+  backdrop-filter: saturate(180%) blur(8px);
+}
+
