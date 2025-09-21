@@ -22,11 +22,17 @@ export default function Student() {
   const loadRatingsForStudent = useAppStore((s) => s.loadRatingsForStudent);
   const getRatingValue = useAppStore((s) => s.getRatingValue);
   const setRating = useAppStore((s) => s.setRating);
+  const updateStudent = useAppStore((s) => s.updateStudent);
   const ratings = useAppStore((s) => s.ratingsByStudent[studentId] || []);
   const computePercent = useAppStore((s) => s.computePercent);
   const notes = useAppStore((s) => s.notesByStudent[studentId] || []);
   const loadNotesForStudent = useAppStore((s) => s.loadNotesForStudent);
   const addNote = useAppStore((s) => s.addNote);
+  const checks = useAppStore((s) => s.checks);
+  const loadChecks = useAppStore((s) => s.loadChecks);
+  const checkMarks = useAppStore((s) => s.checkMarksByStudent[studentId] || {});
+  const loadCheckMarksForStudent = useAppStore((s) => s.loadCheckMarksForStudent);
+  const setCheckMark = useAppStore((s) => s.setCheckMark);
 
   const [tab, setTab] = useState<'scales' | 'history'>('scales');
   const [historyTab, setHistoryTab] = useState<'ratings' | 'notes'>('ratings');
@@ -61,6 +67,8 @@ export default function Student() {
     if (!scales.length) void loadScales();
     void loadRatingsForStudent(studentId);
     void loadNotesForStudent(studentId);
+    void loadChecks();
+    void loadCheckMarksForStudent(studentId);
   }, [studentId, scales.length, loadScales, loadRatingsForStudent, loadNotesForStudent]);
 
   const title = useMemo(() => {
@@ -70,6 +78,27 @@ export default function Student() {
 
   const exportPdf = () => {
     generateStudentPDF(studentId).catch((e)=>console.warn('PDF error', e));
+  };
+
+  // Inline name edit
+  const [editingName, setEditingName] = useState(false);
+  const [editFirst, setEditFirst] = useState('');
+  const [editLast, setEditLast] = useState('');
+  const startEditName = () => {
+    if (!student) return;
+    setEditFirst(student.first_name);
+    setEditLast(student.last_name);
+    setEditingName(true);
+  };
+  const cancelEditName = () => setEditingName(false);
+  const saveEditName = async () => {
+    const first = editFirst.trim();
+    const last = editLast.trim();
+    if (!student || !first || !last) return;
+    await updateStudent({ id: student.id!, first_name: first, last_name: last });
+    const fresh = await getStudent(student.id!);
+    setStudent(fresh ?? { ...student, first_name: first, last_name: last });
+    setEditingName(false);
   };
 
   const handleChange = async (scaleId: string, value: number) => {
@@ -82,17 +111,54 @@ export default function Student() {
     <section className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
         <div className="min-w-0 flex-1">
-          <h1 className="text-xl font-semibold truncate">{title}</h1>
-          {student && (
-            <div className="text-sm text-gray-600">{student.class_name} • #{student.number}</div>
+          {!editingName ? (
+            <>
+              <h1 className="text-xl font-semibold truncate">{title}</h1>
+              {student && (
+                <div className="text-sm text-gray-600">{student.class_name} • #{student.number}</div>
+              )}
+            </>
+          ) : (
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <input className="rounded border px-2 py-1 text-sm" value={editFirst} onChange={(e)=>setEditFirst(e.target.value)} placeholder="First name" />
+                <input className="rounded border px-2 py-1 text-sm" value={editLast} onChange={(e)=>setEditLast(e.target.value)} placeholder="Last name" />
+                <button className="rounded-md bg-brand px-2 py-1 text-xs text-white hover:bg-brand-dark" onClick={saveEditName}>Save</button>
+                <button className="rounded-md border px-2 py-1 text-xs hover:bg-gray-50" onClick={cancelEditName}>Cancel</button>
+              </div>
+              {student && (
+                <div className="text-sm text-gray-600">{student.class_name} • #{student.number}</div>
+              )}
+            </div>
           )}
         </div>
         <div className="flex items-center gap-2">
+          {/* Checks toggles */}
+          {checks.length > 0 && (
+            <div className="flex items-center gap-1 mr-2">
+              {checks.map((c) => {
+                const val = !!checkMarks[c.id];
+                return (
+                  <button
+                    key={c.id}
+                    title={`${c.label}: ${val ? 'Yes' : 'No'}`}
+                    onClick={async ()=>{ await setCheckMark(studentId, c.id, !val); void loadCheckMarksForStudent(studentId); }}
+                    className={`rounded-full border px-2 py-0.5 text-xs ${val? 'bg-emerald-50 border-emerald-300 text-emerald-800' : 'bg-red-50 border-red-300 text-red-800'}`}
+                  >
+                    {c.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
           <button className="rounded-md border px-3 py-1.5 text-sm hover:bg-gray-50" onClick={()=>{ setNoteModal(true); setNoteText(''); setSelectedTags([]); }}>{t('common.add_note')}</button>
           <div className="rounded-md overflow-hidden border">
             <button className={`px-3 py-1.5 text-sm ${tab==='scales'?'bg-gray-50':''}`} onClick={()=>setTab('scales')}>{t('common.scales')}</button>
             <button className={`px-3 py-1.5 text-sm ${tab==='history'?'bg-gray-50':''}`} onClick={()=>setTab('history')}>{t('common.history')}</button>
           </div>
+          {!editingName && student && (
+            <button className="rounded-md border px-3 py-1.5 text-sm hover:bg-gray-50" onClick={startEditName}>Edit Name</button>
+          )}
           <button onClick={exportPdf} className="rounded-md bg-brand px-3 py-1.5 text-sm text-white hover:bg-brand-dark">{t('common.export_pdf')}</button>
         </div>
       </div>
@@ -104,7 +170,9 @@ export default function Student() {
             const min = sc.min ?? -3;
             const max = sc.max ?? 3;
             const points = ratings.filter(r => r.scale_id === sc.id).slice(-10).map((r, idx) => ({ x: idx + 1, y: r.value }));
-            const pct = computePercent(value, min, max);
+            const rawPct = computePercent(value, min, max);
+            const higherIsBetter = sc.higher_is_better !== false;
+            const pct = higherIsBetter ? rawPct : (100 - rawPct);
             const labels = tScaleLabels(sc, t);
             return (
               <div key={sc.id} className="space-y-2">
@@ -114,6 +182,7 @@ export default function Student() {
                   value={value}
                   min={min}
                   max={max}
+                  higherIsBetter={higherIsBetter}
                   onChange={(v) => handleChange(sc.id, v)}
                 />
                 <div className="h-12 rounded border border-gray-200 bg-white px-2">

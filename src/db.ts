@@ -18,6 +18,9 @@ export type Scale = {
   min?: number; // default -3
   max?: number; // default 3
   sort_index?: number; // ordering
+  // When true or undefined, higher numeric values are considered better.
+  // When false, lower numeric values are considered better.
+  higher_is_better?: boolean;
   updated_at: number;
 };
 
@@ -39,6 +42,22 @@ export type Note = {
   updated_at: number;
 };
 
+// Boolean checks (e.g., Homework done?)
+export type CheckDef = {
+  id: string; // e.g., 'homework'
+  label: string; // e.g., 'Homework'
+  sort_index?: number;
+  updated_at: number;
+};
+
+export type CheckMark = {
+  id: string; // `${student_id}:${check_id}`
+  student_id: number;
+  check_id: string;
+  value: boolean;
+  updated_at: number;
+};
+
 // Seating plan per class
 export type SeatingPlan = {
   class_name: string; // primary key
@@ -54,6 +73,8 @@ export class SemDiffDB extends Dexie {
   notes!: Table<Note, string>;
   changes!: Table<ChangeRow, number>;
   seating!: Table<SeatingPlan, string>;
+  checks!: Table<CheckDef, string>;
+  check_marks!: Table<CheckMark, string>;
 
   constructor() {
     super('semdiff');
@@ -102,6 +123,16 @@ export class SemDiffDB extends Dexie {
       notes: 'id, student_id, recorded_at, updated_at',
       changes: '++id, entity, updated_at',
       seating: 'class_name, updated_at',
+    });
+    this.version(6).stores({
+      students: '++id, class_name, number, first_name, last_name, gender, updated_at',
+      scales: 'id, sort_index, updated_at',
+      ratings: 'id, student_id, scale_id, recorded_at, updated_at',
+      notes: 'id, student_id, recorded_at, updated_at',
+      changes: '++id, entity, updated_at',
+      seating: 'class_name, updated_at',
+      checks: 'id, sort_index, updated_at',
+      check_marks: 'id, student_id, check_id, updated_at',
     });
   }
 }

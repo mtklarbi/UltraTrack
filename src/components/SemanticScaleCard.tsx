@@ -6,6 +6,7 @@ export type SemanticScaleCardProps = {
   value: number;
   min?: number;
   max?: number;
+  higherIsBetter?: boolean; // default true
   onChange: (v: number) => void;
 };
 
@@ -19,12 +20,14 @@ function computePercent(value: number, min: number, max: number) {
   return ((v - min) / (max - min)) * 100;
 }
 
-export default function SemanticScaleCard({ left, right, value, min = -3, max = 3, onChange }: SemanticScaleCardProps) {
-  const pct = useMemo(() => computePercent(value, min, max), [value, min, max]);
-  const hue = useMemo(() => 220 - (220 * pct) / 100, [pct]);
+export default function SemanticScaleCard({ left, right, value, min = -3, max = 3, higherIsBetter = true, onChange }: SemanticScaleCardProps) {
+  const rawPct = useMemo(() => computePercent(value, min, max), [value, min, max]);
+  const pct = higherIsBetter ? rawPct : (100 - rawPct);
+  // Map 0..100 -> hue 0 (red) .. 120 (green)
+  const hue = useMemo(() => Math.round((pct / 100) * 120), [pct]);
   const barStyle = {
     width: `${pct}%`,
-    backgroundColor: `hsl(${hue} 80% 50%)`,
+    backgroundColor: `hsl(${hue}, 60%, 45%)`,
   } as React.CSSProperties;
 
   const dec = useCallback(() => onChange(clamp(value - 1, min, max)), [onChange, value, min, max]);

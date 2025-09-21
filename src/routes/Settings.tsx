@@ -5,24 +5,18 @@ import { getApiBase, setApiBase, login, getToken, setToken } from '../api';
 import { syncNow } from '../syncClient';
 import { useTranslation } from 'react-i18next';
 import { tScaleLabels } from '../utils/scaleLabels';
+import { slugify } from '../utils/strings';
 import React from 'react';
+import { listChecks as repoListChecks, upsertCheck as repoUpsertCheck, deleteCheck as repoDeleteCheck, updateChecksOrder as repoUpdateChecksOrder } from '../repository';
 
 type FormState = { id: string; left_label: string; right_label: string; min: number; max: number };
-
-function slugify(input: string) {
-  return input
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/\p{Diacritic}/gu, '')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)/g, '')
-    .slice(0, 40) || 'scale';
-}
 
 export default function Settings() {
   const { t } = useTranslation();
   const scales = useAppStore((s) => s.scales);
   const loadScales = useAppStore((s) => s.loadScales);
+  const checks = useAppStore((s) => s.checks);
+  const loadChecks = useAppStore((s) => s.loadChecks);
   const students = useAppStore((s) => s.students);
   const loadStudents = useAppStore((s) => s.loadStudents);
   const upsertScale = useAppStore((s) => s.upsertScale);
@@ -32,6 +26,7 @@ export default function Settings() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [orderIds, setOrderIds] = useState<string[]>([]);
   const [form, setForm] = useState<FormState>({ id: '', left_label: '', right_label: '', min: -3, max: 3 });
+  const [formHigher, setFormHigher] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
   // Backend sync settings
@@ -53,14 +48,16 @@ export default function Settings() {
   useEffect(() => { if (!scales.length) void loadScales(); }, [scales.length, loadScales]);
   useEffect(() => { setOrderIds(scales.map((s) => s.id)); }, [scales]);
   useEffect(() => { if (!students.length) void loadStudents(); }, [students.length, loadStudents]);
+  useEffect(() => { void loadChecks(); }, [loadChecks]);
 
   const onSubmitNew = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     if (form.min >= form.max) { setError('Min must be less than Max'); return; }
     const id = form.id || slugify(form.left_label || form.right_label);
-    await upsertScale({ id, left_label: form.left_label, right_label: form.right_label, min: form.min, max: form.max });
+    await upsertScale({ id, left_label: form.left_label, right_label: form.right_label, min: form.min, max: form.max, higher_is_better: formHigher });
     setForm({ id: '', left_label: '', right_label: '', min: -3, max: 3 });
+    setFormHigher(true);
   };
 
   const editState = useMemo(() => scales.find((s) => s.id === editingId), [editingId, scales]);
@@ -71,8 +68,9 @@ export default function Settings() {
     const max = Number((document.getElementById('edit-max') as HTMLInputElement).value);
     const left = (document.getElementById('edit-left') as HTMLInputElement).value;
     const right = (document.getElementById('edit-right') as HTMLInputElement).value;
+    const hib = (document.getElementById('edit-higher') as HTMLInputElement)?.checked ?? true;
     if (min >= max) { setError('Min must be less than Max'); return; }
-    await upsertScale({ id: editState.id, left_label: left, right_label: right, min, max });
+    await upsertScale({ id: editState.id, left_label: left, right_label: right, min, max, higher_is_better: hib });
     setEditingId(null);
   };
 
@@ -109,7 +107,8 @@ export default function Settings() {
           <h2 className="text-lg font-semibold mb-2">{t('settings.scales')}</h2>
           <ul className="space-y-2">
             {orderIds.map((id) => {
-              const s = scales.find((x) => x.id === id)!;
+              const s = scales.find((x) => x.id === id);
+              if (!s) return null; // scale may be mid-delete; skip rendering
               const isEditing = editingId === id;
               return (
                 <li key={id}
@@ -138,6 +137,14 @@ export default function Settings() {
                           <input id="edit-min" type="number" defaultValue={s.min ?? -3} className="w-20 rounded border px-2 py-1 text-sm" />
                           <input id="edit-max" type="number" defaultValue={s.max ?? 3} className="w-20 rounded border px-2 py-1 text-sm" />
                         </div>
+                        <label className="col-span-5 flex items-center gap-2 text-sm text-gray-700">
+                          <input id="edit-higher" type="checkbox" defaultChecked={s.higher_is_better !== false} />
+                          Higher is better
+                        </label>
+                        <label className="col-span-5 flex items-center gap-2 text-sm text-gray-700">
+                          <input id="edit-higher" type="checkbox" defaultChecked={s.higher_is_better !== false} />
+                          Higher is better
+                        </label>
                         <div className="col-span-5 flex items-center justify-end gap-2">
                           <button className="rounded-md border px-2 py-1 text-sm hover:bg-gray-50" onClick={() => setEditingId(null)}>Cancel</button>
                           <button className="rounded-md bg-brand text-white px-2 py-1 text-sm hover:bg-brand-dark" onClick={onSaveEdit}>Save</button>
@@ -152,6 +159,11 @@ export default function Settings() {
         </div>
 
         <div>
+          <h2 className="text-lg font-semibold mb-2">Checks</h2>
+          <ChecksAdmin reload={loadChecks} items={checks} />
+        </div>
+
+        <div>
           <h2 className="text-lg font-semibold mb-2">{t('settings.add_scale')}</h2>
           <form onSubmit={onSubmitNew} className="space-y-3 rounded-md border bg-white p-3 shadow-sm">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -162,6 +174,14 @@ export default function Settings() {
               <input type="number" value={form.min} onChange={(e)=>setForm(f=>({...f,min:Number(e.target.value)}))} className="w-24 rounded border px-2 py-1 text-sm" placeholder={t('settings.min')} />
               <input type="number" value={form.max} onChange={(e)=>setForm(f=>({...f,max:Number(e.target.value)}))} className="w-24 rounded border px-2 py-1 text-sm" placeholder={t('settings.max')} />
             </div>
+            <label className="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" checked={formHigher} onChange={(e)=>setFormHigher(e.target.checked)} />
+              Higher is better
+            </label>
+            <label className="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" checked={formHigher} onChange={(e)=>setFormHigher(e.target.checked)} />
+              Higher is better
+            </label>
             {error && <div className="text-sm text-red-600">{error}</div>}
             <div className="flex items-center gap-2">
               <input value={form.id} onChange={(e)=>setForm(f=>({...f,id:e.target.value}))} placeholder={t('settings.optional_id')} className="flex-1 rounded border px-2 py-1 text-sm" />
@@ -274,6 +294,8 @@ export default function Settings() {
 function StudentAdmin() {
   const students = useAppStore((s) => s.students);
   const addStudent = useAppStore((s) => s.addStudent);
+  const updateStudent = useAppStore((s) => s.updateStudent);
+  const updateStudentIdAndInfo = useAppStore((s) => s.updateStudentIdAndInfo);
   const deleteStudent = useAppStore((s) => s.deleteStudent);
   const deleteClass = useAppStore((s) => s.deleteClass);
 
@@ -285,6 +307,23 @@ function StudentAdmin() {
 
   const [form, setForm] = React.useState({ class_name: '', number: 1, first_name: '', last_name: '', gender: '' });
   React.useEffect(()=>{ setForm(f=>({...f, class_name: selectedClass || f.class_name})); }, [selectedClass]);
+
+  // inline edit state
+  const [editingId, setEditingId] = React.useState<number | null>(null);
+  const [editFirst, setEditFirst] = React.useState<string>('');
+  const [editLast, setEditLast] = React.useState<string>('');
+  const startEdit = (id: number, first: string, last: string) => {
+    setEditingId(id); setEditFirst(first); setEditLast(last);
+  };
+  const cancelEdit = () => { setEditingId(null); };
+  const saveEdit = async () => {
+    if (editingId == null) return;
+    const first = editFirst.trim();
+    const last = editLast.trim();
+    if (!first || !last) { alert('Enter both first and last name'); return; }
+    await updateStudent({ id: editingId, first_name: first, last_name: last });
+    setEditingId(null);
+  };
 
   return (
     <div className="space-y-3 rounded-md border bg-white shadow-sm p-3">
@@ -308,27 +347,74 @@ function StudentAdmin() {
         <table className="min-w-full text-sm">
           <thead className="bg-gray-50">
             <tr>
-              <th className="text-left px-3 py-2">#</th>
+              <th className="text-left px-3 py-2"># / ID</th>
               <th className="text-left px-3 py-2">First</th>
               <th className="text-left px-3 py-2">Last</th>
+              <th className="text-left px-3 py-2">Class</th>
               <th className="text-left px-3 py-2"></th>
             </tr>
           </thead>
           <tbody>
-            {classStudents.map(s => (
-              <tr key={s.id} className="border-t">
-                <td className="px-3 py-2">{s.number}</td>
-                <td className="px-3 py-2">{s.first_name}</td>
-                <td className="px-3 py-2">{s.last_name}</td>
-                <td className="px-3 py-2 text-right">
-                  <button className="rounded-md border px-2 py-1 text-xs hover:bg-red-50 text-red-700" onClick={async ()=>{
-                    if (confirm(`Delete student #${s.number} ${s.first_name} ${s.last_name}?`)) {
-                      await deleteStudent(s.id!);
-                    }
-                  }}>Delete</button>
-                </td>
-              </tr>
-            ))}
+            {classStudents.map(s => {
+              const isEditing = editingId === s.id;
+              return (
+                <tr key={s.id} className="border-t">
+                  <td className="px-3 py-2">
+                    {!isEditing ? (
+                      <>
+                        <div className="font-medium">#{s.number}</div>
+                        <div className="text-xs text-gray-600">ID: {s.id}</div>
+                      </>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <input type="number" className="w-16 rounded border px-2 py-1 text-sm" defaultValue={s.number} id={`edit-num-${s.id}`} />
+                        <input type="number" className="w-24 rounded border px-2 py-1 text-sm" defaultValue={s.id} id={`edit-id-${s.id}`} />
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-3 py-2">
+                    {!isEditing ? s.first_name : (<input className="rounded border px-2 py-1 text-sm w-full" defaultValue={s.first_name} id={`edit-first-${s.id}`} />)}
+                  </td>
+                  <td className="px-3 py-2">
+                    {!isEditing ? s.last_name : (<input className="rounded border px-2 py-1 text-sm w-full" defaultValue={s.last_name} id={`edit-last-${s.id}`} />)}
+                  </td>
+                  <td className="px-3 py-2">
+                    {!isEditing ? s.class_name : (<input className="rounded border px-2 py-1 text-sm w-full" defaultValue={s.class_name} id={`edit-class-${s.id}`} />)}
+                  </td>
+                  <td className="px-3 py-2 text-right space-x-2">
+                    {!isEditing ? (
+                      <>
+                        <button className="rounded-md border px-2 py-1 text-xs hover:bg-gray-50" onClick={()=>startEdit(s.id!, s.first_name, s.last_name)}>Edit</button>
+                        <button className="rounded-md border px-2 py-1 text-xs hover:bg-red-50 text-red-700" onClick={async ()=>{
+                          if (confirm(`Delete student #${s.number} ${s.first_name} ${s.last_name}?`)) {
+                            await deleteStudent(s.id!);
+                          }
+                        }}>Delete</button>
+                      </>
+                    ) : (
+                      <>
+                        <button className="rounded-md bg-brand text-white px-2 py-1 text-xs hover:bg-brand-dark" onClick={async ()=>{
+                          const newFirst = (document.getElementById(`edit-first-${s.id}`) as HTMLInputElement).value.trim();
+                          const newLast = (document.getElementById(`edit-last-${s.id}`) as HTMLInputElement).value.trim();
+                          const newNum = Number((document.getElementById(`edit-num-${s.id}`) as HTMLInputElement).value);
+                          const newIdStr = (document.getElementById(`edit-id-${s.id}`) as HTMLInputElement).value;
+                          const newId = Number(newIdStr);
+                          const newClass = (document.getElementById(`edit-class-${s.id}`) as HTMLInputElement).value.trim();
+                          if (!newFirst || !newLast || !newClass || Number.isNaN(newNum) || Number.isNaN(newId)) { alert('Please fill all fields with valid values'); return; }
+                          try {
+                            await updateStudentIdAndInfo({ id: s.id!, new_id: newId === s.id ? undefined : newId, first_name: newFirst, last_name: newLast, number: newNum, class_name: newClass });
+                            setEditingId(null);
+                          } catch (e:any) {
+                            alert(e?.message || 'Update failed');
+                          }
+                        }}>Save</button>
+                        <button className="rounded-md border px-2 py-1 text-xs hover:bg-gray-50" onClick={cancelEdit}>Cancel</button>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
             {classStudents.length===0 && (
               <tr><td className="px-3 py-2 text-gray-600" colSpan={4}>No students in this class.</td></tr>
             )}
@@ -347,6 +433,56 @@ function StudentAdmin() {
           setForm(f=>({...f, first_name: '', last_name: ''}));
         }}>Add Student</button>
       </div>
+    </div>
+  );
+}
+
+function ChecksAdmin({ items, reload }: { items: { id: string; label: string }[]; reload: () => Promise<void> }) {
+  const [label, setLabel] = React.useState('Homework');
+  const [orderIds, setOrderIds] = React.useState<string[]>([]);
+  const [dragId, setDragId] = React.useState<string | null>(null);
+  React.useEffect(() => { setOrderIds(items.map(i=>i.id)); }, [items]);
+
+  const onDragStart = (id: string) => (e: React.DragEvent) => { setDragId(id); e.dataTransfer.effectAllowed = 'move'; };
+  const onDragOver = (overId: string) => (e: React.DragEvent) => {
+    e.preventDefault(); if (!dragId || dragId===overId) return; const ids=[...orderIds];
+    const from=ids.indexOf(dragId); const to=ids.indexOf(overId); if(from===-1||to===-1) return; ids.splice(to,0,ids.splice(from,1)[0]); setOrderIds(ids);
+  };
+  const onDrop = async () => { if (dragId) { await repoUpdateChecksOrder(orderIds); setDragId(null); await reload(); } };
+
+  return (
+    <div className="space-y-3 rounded-md border bg-white shadow-sm p-3">
+      <ul className="space-y-2">
+        {orderIds.map((id)=>{
+          const c = items.find(x=>x.id===id);
+          if (!c) return null;
+          return (
+            <li key={id}
+                draggable
+                onDragStart={onDragStart(id)}
+                onDragOver={onDragOver(id)}
+                onDrop={onDrop}
+                className={`rounded-md border bg-white shadow-sm ${dragId===id? 'opacity-70':''}`}>
+              <div className="p-3 flex items-center justify-between gap-2">
+                <div className="min-w-0 font-medium truncate">{c.label} <span className="text-xs text-gray-500">({c.id})</span></div>
+                <button className="rounded-md border px-2 py-1 text-sm hover:bg-red-50 text-red-700" onClick={async()=>{ if (confirm(`Delete check '${c.label}'?`)) { await repoDeleteCheck(c.id); await reload(); } }}>Delete</button>
+              </div>
+            </li>
+          );
+        })}
+        {items.length===0 && <li className="text-sm text-gray-600 px-1">No checks yet.</li>}
+      </ul>
+      <div className="flex items-center gap-2">
+        <input value={label} onChange={(e)=>setLabel(e.target.value)} className="rounded border px-2 py-1 text-sm" placeholder="Check label (e.g., Homework)" />
+        <button className="rounded-md bg-brand text-white px-2 py-1 text-sm hover:bg-brand-dark" onClick={async()=>{
+          const id = slugify(label);
+          if (!id) return;
+          await repoUpsertCheck({ id, label });
+          setLabel('');
+          await reload();
+        }}>Add</button>
+      </div>
+      <div className="text-xs text-gray-600">Tip: Drag to reorder. The first check is used as the primary card indicator on Accueil (or 'homework' if present).</div>
     </div>
   );
 }

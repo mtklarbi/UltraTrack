@@ -1,4 +1,4 @@
-import { db, type Student, type Scale, type Rating, type Note, type SeatingPlan } from './db';
+import { db, type Student, type Scale, type Rating, type Note, type SeatingPlan, type CheckDef, type CheckMark } from './db';
 
 const now = () => Date.now();
 
@@ -30,6 +30,76 @@ export async function addStudent(s: Omit<Student, 'id' | 'updated_at'> & Partial
   return db.students.add(row);
 }
 
+export async function updateStudentCascade(input: { id: number; new_id?: number; class_name?: string; number?: number; first_name?: string; last_name?: string; gender?: string }): Promise<number> {
+  const existing = await db.students.get(input.id);
+  if (!existing) throw new Error('Student not found');
+  const targetId = input.new_id ?? existing.id!;
+  if (targetId !== existing.id) {
+    const conflict = await db.students.get(targetId);
+    if (conflict) throw new Error('Target student ID already exists');
+  }
+
+  const nextStudent: Student = {
+    ...existing,
+    class_name: input.class_name ?? existing.class_name,
+    number: input.number ?? existing.number,
+    first_name: input.first_name ?? existing.first_name,
+    last_name: input.last_name ?? existing.last_name,
+    gender: input.gender ?? existing.gender,
+    id: targetId,
+    updated_at: now(),
+  };
+
+  await db.transaction('rw', db.students, db.ratings, db.notes, db.seating, async () => {
+    // If changing id: update references first
+    if (targetId !== existing.id) {
+      await db.ratings.where('student_id').equals(existing.id!).modify({ student_id: targetId });
+      await db.notes.where('student_id').equals(existing.id!).modify({ student_id: targetId });
+      // Update seating occurrences
+      const plans = await db.seating.toArray();
+      for (const plan of plans) {
+        let changed = false;
+        const seats = plan.seats.slice();
+        for (let i = 0; i < seats.length; i++) {
+          if (seats[i] === existing.id) { seats[i] = targetId; changed = true; }
+        }
+        if (changed) { plan.seats = seats; plan.updated_at = now(); await db.seating.put(plan); }
+      }
+      // Replace student row: add new, delete old
+      await db.students.put(nextStudent);
+      await db.students.delete(existing.id!);
+    } else {
+      await db.students.put(nextStudent);
+    }
+
+    // Handle class move: remove from old class seating, add to new class seating
+    if (existing.class_name !== nextStudent.class_name) {
+      const oldPlan = await db.seating.get(existing.class_name);
+      if (oldPlan) {
+        const seats = oldPlan.seats.slice();
+        let changed = false;
+        for (let i = 0; i < seats.length; i++) {
+          if (seats[i] === targetId) { seats[i] = null; changed = true; }
+        }
+        if (changed) { oldPlan.seats = seats; oldPlan.updated_at = now(); await db.seating.put(oldPlan); }
+      }
+      let newPlan = await db.seating.get(nextStudent.class_name);
+      if (!newPlan) {
+        newPlan = await ensureSeatingForClass(nextStudent.class_name);
+      }
+      if (newPlan && !newPlan.seats.includes(targetId)) {
+        const seats = newPlan.seats.slice();
+        const idx = seats.findIndex((s) => s == null);
+        if (idx !== -1) seats[idx] = targetId; // place in first empty seat
+        newPlan.seats = seats; newPlan.updated_at = now();
+        await db.seating.put(newPlan);
+      }
+    }
+  });
+
+  return targetId;
+}
+
 export async function listClasses(): Promise<string[]> {
   const all = await db.students.toArray();
   return Array.from(new Set(all.map((s) => s.class_name))).sort();
@@ -48,7 +118,7 @@ export async function deleteClassCascade(className: string): Promise<void> {
 
 // Scales
 export async function upsertScale(s: Omit<Scale, 'updated_at' | 'sort_index'> & Partial<Pick<Scale, 'updated_at' | 'sort_index'>>): Promise<string> {
-  const base: Scale = { min: -3, max: 3, updated_at: now(), ...s };
+  const base: Scale = { min: -3, max: 3, updated_at: now(), higher_is_better: s.higher_is_better ?? true, ...s } as Scale;
   // If inserting new scale without sort_index, append to end
   const existing = await db.scales.get(base.id);
   if (!existing && base.sort_index == null) {
@@ -151,4 +221,52 @@ export async function ensureSeatingForClass(className: string): Promise<SeatingP
   const plan: SeatingPlan = { class_name: className, seats, updated_at: Date.now() };
   await upsertSeatingPlan(plan);
   return plan;
+}
+
+// Checks (boolean flags per student)
+export async function listChecks(): Promise<CheckDef[]> {
+  const items = await db.checks.toArray();
+  return items.sort((a,b)=> (a.sort_index ?? 0) - (b.sort_index ?? 0) || a.id.localeCompare(b.id));
+}
+
+export async function upsertCheck(def: Omit<CheckDef, 'updated_at' | 'sort_index'> & Partial<Pick<CheckDef, 'updated_at' | 'sort_index'>>): Promise<string> {
+  const row: CheckDef = { updated_at: now(), sort_index: def.sort_index, ...def } as CheckDef;
+  // append to end if new without sort_index
+  const existing = await db.checks.get(row.id);
+  if (!existing && row.sort_index == null) {
+    const last = await db.checks.orderBy('sort_index').last();
+    row.sort_index = (last?.sort_index ?? -1) + 1;
+  }
+  await db.checks.put(row);
+  return row.id;
+}
+
+export async function deleteCheck(id: string) {
+  await db.transaction('rw', db.checks, db.check_marks, async () => {
+    await db.checks.delete(id);
+    await db.check_marks.where('check_id').equals(id).delete();
+  });
+}
+
+export async function updateChecksOrder(ids: string[]) {
+  await db.transaction('rw', db.checks, async () => {
+    let i = 0;
+    for (const id of ids) {
+      const c = await db.checks.get(id);
+      if (c) { c.sort_index = i++; c.updated_at = now(); await db.checks.put(c); }
+    }
+  });
+}
+
+export async function getCheckMarksForStudent(studentId: number): Promise<Record<string, boolean>> {
+  const list = await db.check_marks.where('student_id').equals(studentId).toArray();
+  const map: Record<string, boolean> = {};
+  for (const r of list) map[r.check_id] = r.value;
+  return map;
+}
+
+export async function setCheckMark(studentId: number, checkId: string, value: boolean): Promise<void> {
+  const id = `${studentId}:${checkId}`;
+  const row: CheckMark = { id, student_id: studentId, check_id: checkId, value, updated_at: now() };
+  await db.check_marks.put(row);
 }

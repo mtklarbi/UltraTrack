@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Student, Scale, Rating, Note } from '../db';
+import type { Student, Scale, Rating, Note, CheckDef } from '../db';
 import {
   listStudents as repoListStudents,
   upsertScale as repoUpsertScale,
@@ -82,8 +82,17 @@ export type AppState = {
   loadNotesForStudent: (studentId: number) => Promise<void>;
   addNote: (input: { student_id: number; text: string; tags?: string[] }) => Promise<void>;
 
+  // checks
+  checks: CheckDef[];
+  loadChecks: () => Promise<void>;
+  checkMarksByStudent: Record<number, Record<string, boolean>>; // studentId -> { checkId: value }
+  loadCheckMarksForStudent: (studentId: number) => Promise<void>;
+  setCheckMark: (studentId: number, checkId: string, value: boolean) => Promise<void>;
+
   // student admin
   addStudent: (input: { class_name: string; number: number; first_name: string; last_name: string; gender?: string }) => Promise<number>;
+  updateStudent: (input: { id: number; first_name?: string; last_name?: string; class_name?: string; number?: number; gender?: string }) => Promise<void>;
+  updateStudentIdAndInfo: (input: { id: number; new_id?: number; class_name?: string; number?: number; first_name?: string; last_name?: string; gender?: string }) => Promise<number>;
   deleteStudent: (id: number) => Promise<void>;
   deleteClass: (class_name: string) => Promise<void>;
 };
@@ -220,12 +229,45 @@ export const useAppStore = create<AppState>((set, get) => ({
     sync.endSync();
   },
 
+  // checks
+  checks: [],
+  loadChecks: async () => {
+    const { listChecks } = await import('../repository');
+    const checks = await listChecks();
+    set({ checks });
+  },
+  checkMarksByStudent: {},
+  loadCheckMarksForStudent: async (studentId) => {
+    const { getCheckMarksForStudent } = await import('../repository');
+    const marks = await getCheckMarksForStudent(studentId);
+    set((s) => ({ checkMarksByStudent: { ...s.checkMarksByStudent, [studentId]: marks } }));
+  },
+  setCheckMark: async (studentId, checkId, value) => {
+    const { setCheckMark } = await import('../repository');
+    await setCheckMark(studentId, checkId, value);
+    set((s) => ({ checkMarksByStudent: { ...s.checkMarksByStudent, [studentId]: { ...(s.checkMarksByStudent[studentId]||{}), [checkId]: value } } }));
+  },
+
   // student admin
   addStudent: async (input) => {
     const { addStudent } = await import('../repository');
     const id = await addStudent({ ...input });
     await get().loadStudents();
     return id;
+  },
+  updateStudent: async (input) => {
+    const { getStudent, upsertStudent } = await import('../repository');
+    const existing = await getStudent(input.id);
+    if (!existing) return;
+    const updated = { ...existing, ...input, updated_at: Date.now() } as Student;
+    await upsertStudent(updated);
+    await get().loadStudents();
+  },
+  updateStudentIdAndInfo: async (input) => {
+    const { updateStudentCascade } = await import('../repository');
+    const newId = await updateStudentCascade(input);
+    await get().loadStudents();
+    return newId;
   },
   deleteStudent: async (id) => {
     const { deleteStudent } = await import('../repository');
