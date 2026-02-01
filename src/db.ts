@@ -47,6 +47,84 @@ export type SeatingPlan = {
   updated_at: number;
 };
 
+// Incident types (predefined behavior issues)
+export type IncidentType = {
+  id: string; // e.g., 'talking', 'late'
+  label: string; // Display name
+  points: number; // Points to deduct (positive number, will be subtracted)
+  sort_index?: number;
+  updated_at: number;
+};
+
+// Incidents (recorded behavior events)
+export type Incident = {
+  id: string;
+  student_id: number;
+  incident_type_id: string;
+  points: number; // Actual points deducted (can be customized per incident)
+  note?: string; // Optional custom note
+  recorded_at: number;
+  updated_at: number;
+};
+
+// Weekly behavior grades
+export type WeeklyGrade = {
+  id: string; // `${student_id}_${week_start}`
+  student_id: number;
+  week_start: number; // Monday timestamp
+  initial_grade: number; // Starting grade (default 20)
+  current_grade: number; // Current grade after deductions
+  updated_at: number;
+};
+
+// Settings for behavior grade system
+export type BehaviorSettings = {
+  id: string; // 'default'
+  initial_grade: number; // Default starting grade (20)
+  reset_day: number; // 0 = Sunday, 1 = Monday, etc.
+  updated_at: number;
+};
+
+// Star categories for simple tracking
+export type StarCategory = 'participation' | 'homework' | 'attention';
+
+// Daily star record for a student
+export type DailyStar = {
+  id: string; // `${student_id}_${date_str}_${category}`
+  student_id: number;
+  date: string; // YYYY-MM-DD format
+  category: StarCategory;
+  stars: number; // 0-3 stars
+  recorded_at: number;
+  updated_at: number;
+};
+
+// Absence record for a student on a specific date
+export type Absence = {
+  id: string; // `${student_id}_${date}`
+  student_id: number;
+  date: string; // YYYY-MM-DD format
+  recorded_at: number;
+  updated_at: number;
+};
+
+// Grade scale configuration
+export type GradeScaleType = 'percentage' | 'letter' | 'numeric';
+
+export type GradeScale = {
+  id: string; // 'default'
+  type: GradeScaleType;
+  // For letter grades: thresholds for each letter (e.g., A=90, B=80, etc.)
+  // For numeric grades: min and max values
+  thresholds: GradeThreshold[];
+  updated_at: number;
+};
+
+export type GradeThreshold = {
+  label: string; // e.g., 'A', 'B', '18', '15'
+  minPercent: number; // Minimum percentage for this grade (0-100)
+};
+
 export class SemDiffDB extends Dexie {
   students!: Table<Student, number>;
   scales!: Table<Scale, string>;
@@ -54,6 +132,13 @@ export class SemDiffDB extends Dexie {
   notes!: Table<Note, string>;
   changes!: Table<ChangeRow, number>;
   seating!: Table<SeatingPlan, string>;
+  incidentTypes!: Table<IncidentType, string>;
+  incidents!: Table<Incident, string>;
+  weeklyGrades!: Table<WeeklyGrade, string>;
+  behaviorSettings!: Table<BehaviorSettings, string>;
+  dailyStars!: Table<DailyStar, string>;
+  absences!: Table<Absence, string>;
+  gradeScale!: Table<GradeScale, string>;
 
   constructor() {
     super('semdiff');
@@ -102,6 +187,46 @@ export class SemDiffDB extends Dexie {
       notes: 'id, student_id, recorded_at, updated_at',
       changes: '++id, entity, updated_at',
       seating: 'class_name, updated_at',
+    });
+    this.version(6).stores({
+      students: '++id, class_name, number, first_name, last_name, gender, updated_at',
+      scales: 'id, sort_index, updated_at',
+      ratings: 'id, student_id, scale_id, recorded_at, updated_at',
+      notes: 'id, student_id, recorded_at, updated_at',
+      changes: '++id, entity, updated_at',
+      seating: 'class_name, updated_at',
+      incidentTypes: 'id, sort_index, updated_at',
+      incidents: 'id, student_id, incident_type_id, recorded_at, updated_at',
+      weeklyGrades: 'id, student_id, week_start, updated_at',
+      behaviorSettings: 'id',
+    });
+    this.version(7).stores({
+      students: '++id, class_name, number, first_name, last_name, gender, updated_at',
+      scales: 'id, sort_index, updated_at',
+      ratings: 'id, student_id, scale_id, recorded_at, updated_at',
+      notes: 'id, student_id, recorded_at, updated_at',
+      changes: '++id, entity, updated_at',
+      seating: 'class_name, updated_at',
+      incidentTypes: 'id, sort_index, updated_at',
+      incidents: 'id, student_id, incident_type_id, recorded_at, updated_at',
+      weeklyGrades: 'id, student_id, week_start, updated_at',
+      behaviorSettings: 'id',
+      dailyStars: 'id, student_id, date, category, updated_at',
+    });
+    this.version(8).stores({
+      students: '++id, class_name, number, first_name, last_name, gender, updated_at',
+      scales: 'id, sort_index, updated_at',
+      ratings: 'id, student_id, scale_id, recorded_at, updated_at',
+      notes: 'id, student_id, recorded_at, updated_at',
+      changes: '++id, entity, updated_at',
+      seating: 'class_name, updated_at',
+      incidentTypes: 'id, sort_index, updated_at',
+      incidents: 'id, student_id, incident_type_id, recorded_at, updated_at',
+      weeklyGrades: 'id, student_id, week_start, updated_at',
+      behaviorSettings: 'id',
+      dailyStars: 'id, student_id, date, category, updated_at',
+      absences: 'id, student_id, date, updated_at',
+      gradeScale: 'id',
     });
   }
 }

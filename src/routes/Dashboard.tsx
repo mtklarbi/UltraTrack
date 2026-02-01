@@ -1,415 +1,523 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useAppStore } from '../store/app';
-import { generateClassSummaryPDF } from '../pdf';
 import { useTranslation } from 'react-i18next';
-import { tScaleLabels } from '../utils/scaleLabels';
+import { Link } from 'react-router-dom';
+import {
+  getSemesterAverage,
+  getSemesterStarHistory,
+  getGradeScale,
+  convertPercentToGrade,
+  getAbsenceCount,
+  type SemesterAverage,
+  type WeeklyStarRecord,
+} from '../repository';
+import type { GradeScale } from '../db';
 
-type Row = {
+type StudentSemesterData = {
   id: number;
   name: string;
   class_name: string;
   number: number;
+  semesterAvg: SemesterAverage;
+  history: WeeklyStarRecord[];
+  absenceCount: number;
 };
-
-function hueForPercent(pct: number) {
-  const hue = 220 - (220 * pct) / 100; // 0..100 => 220..0
-  return `hsl(${hue} 80% 50%)`;
-}
 
 export default function Dashboard() {
   const { t } = useTranslation();
   const students = useAppStore((s) => s.students);
   const loadStudents = useAppStore((s) => s.loadStudents);
-  const scales = useAppStore((s) => s.scales);
-  const loadScales = useAppStore((s) => s.loadScales);
-  const ratingsByStudent = useAppStore((s) => s.ratingsByStudent);
-  const loadRatingsForStudent = useAppStore((s) => s.loadRatingsForStudent);
-  const getRatingValue = useAppStore((s) => s.getRatingValue);
-  const computePercent = useAppStore((s) => s.computePercent);
-  const setRating = useAppStore((s) => s.setRating);
-  const upsertRating = useAppStore((s) => s.upsertRating);
 
   useEffect(() => { if (!students.length) void loadStudents(); }, [students.length, loadStudents]);
-  useEffect(() => { if (!scales.length) void loadScales(); }, [scales.length, loadScales]);
 
   const classes = useMemo(() => Array.from(new Set(students.map((s) => s.class_name))).sort(), [students]);
   const [selectedClass, setSelectedClass] = useState<string>('');
-  const [selectedScaleId, setSelectedScaleId] = useState<string>('');
-
-  // Selection state
-  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
-  const toggleSelect = (id: number) => setSelectedIds((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
-  const clearSelection = () => setSelectedIds(new Set());
-  const selectAll = () => setSelectedIds(new Set(visibleStudents.map(s=>s.id)));
-
-  // Batch last action (for undo)
-  const [lastBatch, setLastBatch] = useState<null | { className: string; scaleId: string; entries: { studentId: number; prev: number }[]; at: number }>(null);
+  const [sortBy, setSortBy] = useState<'name' | 'average' | 'weeks'>('average');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
   useEffect(() => {
     if (!selectedClass && classes.length) setSelectedClass(classes[0]);
   }, [classes, selectedClass]);
 
-  useEffect(() => {
-    if (!selectedScaleId && scales.length) setSelectedScaleId(scales[0].id);
-  }, [scales, selectedScaleId]);
+  // Load semester data for all students in class
+  const [semesterData, setSemesterData] = useState<Map<number, StudentSemesterData>>(new Map());
+  const [gradeScale, setGradeScale] = useState<GradeScale | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const visibleStudents: Row[] = useMemo(() => {
-    return students
-      .filter((s) => !selectedClass || s.class_name === selectedClass)
-      .map((s) => ({ id: s.id!, name: `${s.last_name} ${s.first_name}`, class_name: s.class_name, number: s.number }));
+  useEffect(() => {
+    const loadData = async () => {
+      if (!selectedClass) return;
+      setLoading(true);
+
+      const scale = await getGradeScale();
+      setGradeScale(scale);
+
+      const data = new Map<number, StudentSemesterData>();
+      const classStudents = students.filter(s => s.class_name === selectedClass);
+
+      for (const student of classStudents) {
+        const [semesterAvg, history, absenceCount] = await Promise.all([
+          getSemesterAverage(student.id!),
+          getSemesterStarHistory(student.id!),
+          getAbsenceCount(student.id!),
+        ]);
+        data.set(student.id!, {
+          id: student.id!,
+          name: `${student.last_name} ${student.first_name}`,
+          class_name: student.class_name,
+          number: student.number,
+          semesterAvg,
+          history,
+          absenceCount,
+        });
+      }
+
+      setSemesterData(data);
+      setLoading(false);
+    };
+    loadData();
   }, [students, selectedClass]);
 
-  // Load ratings for visible students
-  useEffect(() => {
-    if (!visibleStudents.length) return;
-    const missing = visibleStudents.filter((s) => !ratingsByStudent[s.id]);
-    if (!missing.length) return;
-    void Promise.all(missing.map((r) => loadRatingsForStudent(r.id)));
-  }, [visibleStudents, ratingsByStudent, loadRatingsForStudent]);
-
-  const sortScale = useMemo(() => scales.find((s) => s.id === selectedScaleId), [scales, selectedScaleId]);
+  // Sorted student list
   const sortedStudents = useMemo(() => {
-    if (!sortScale) return visibleStudents;
-    const min = sortScale.min ?? -3;
-    const max = sortScale.max ?? 3;
-    return [...visibleStudents].sort((a, b) => {
-      const av = getRatingValue(a.id, sortScale.id);
-      const bv = getRatingValue(b.id, sortScale.id);
-      const ap = av == null ? Infinity : computePercent(av, min, max);
-      const bp = bv == null ? Infinity : computePercent(bv, min, max);
-      return ap - bp;
+    const entries = Array.from(semesterData.values());
+    return entries.sort((a, b) => {
+      let cmp = 0;
+      if (sortBy === 'name') {
+        cmp = a.name.localeCompare(b.name);
+      } else if (sortBy === 'average') {
+        cmp = a.semesterAvg.overall - b.semesterAvg.overall;
+      } else if (sortBy === 'weeks') {
+        cmp = a.semesterAvg.totalWeeks - b.semesterAvg.totalWeeks;
+      }
+      return sortDir === 'desc' ? -cmp : cmp;
     });
-  }, [visibleStudents, sortScale, getRatingValue, computePercent]);
+  }, [semesterData, sortBy, sortDir]);
 
-  async function applyBatch(delta: number) {
-    if (!selectedScaleId || selectedIds.size === 0) return;
-    const entries: { studentId: number; prev: number }[] = [];
-    for (const st of sortedStudents) {
-      if (!selectedIds.has(st.id)) continue;
-      const prev = getRatingValue(st.id, selectedScaleId) ?? 0;
-      entries.push({ studentId: st.id, prev });
+  // Class-wide stats
+  const classStats = useMemo(() => {
+    const entries = Array.from(semesterData.values());
+    if (entries.length === 0) {
+      return {
+        avgOverall: 0,
+        avgParticipation: 0,
+        avgHomework: 0,
+        avgAttention: 0,
+        totalWeeks: 0,
+        topStudents: [] as StudentSemesterData[],
+        strugglingStudents: [] as StudentSemesterData[],
+      };
     }
-    // apply
-    for (const e of entries) {
-      await upsertRating(e.studentId, selectedScaleId, delta);
+
+    const withData = entries.filter(e => e.semesterAvg.totalWeeks > 0);
+    if (withData.length === 0) {
+      return {
+        avgOverall: 0,
+        avgParticipation: 0,
+        avgHomework: 0,
+        avgAttention: 0,
+        totalWeeks: 0,
+        topStudents: [],
+        strugglingStudents: [],
+      };
     }
-    setLastBatch({ className: selectedClass, scaleId: selectedScaleId, entries, at: Date.now() });
-  }
 
-  async function undoBatch() {
-    if (!lastBatch) return;
-    const { entries, scaleId } = lastBatch;
-    for (const e of entries) {
-      await setRating(e.studentId, scaleId, e.prev);
-    }
-    setLastBatch(null);
-  }
+    const avgOverall = withData.reduce((sum, e) => sum + e.semesterAvg.overall, 0) / withData.length;
+    const avgParticipation = withData.reduce((sum, e) => sum + e.semesterAvg.participation, 0) / withData.length;
+    const avgHomework = withData.reduce((sum, e) => sum + e.semesterAvg.homework, 0) / withData.length;
+    const avgAttention = withData.reduce((sum, e) => sum + e.semesterAvg.attention, 0) / withData.length;
+    const maxWeeks = Math.max(...withData.map(e => e.semesterAvg.totalWeeks));
 
-  // Class average for selected scale
-  const classAveragePct = useMemo(() => {
-    if (!sortScale || !sortedStudents.length) return 0;
-    const min = sortScale.min ?? -3;
-    const max = sortScale.max ?? 3;
-    const vals = sortedStudents
-      .map((s) => getRatingValue(s.id, sortScale.id))
-      .filter((v): v is number => v != null);
-    if (!vals.length) return 0;
-    const avg = vals.reduce((a, b) => a + computePercent(b, min, max), 0) / vals.length;
-    return avg;
-  }, [sortedStudents, sortScale, getRatingValue, computePercent]);
+    const sorted = [...withData].sort((a, b) => b.semesterAvg.overall - a.semesterAvg.overall);
+    const topStudents = sorted.slice(0, 5);
+    const strugglingStudents = sorted.filter(s => s.semesterAvg.overall < 50).slice(-5).reverse();
 
-  // Improvements/drops last 7 days for selected scale
-  const improvements = useMemo(() => {
-    if (!sortScale) return { top: [], drops: [] } as { top: { id: number; name: string; delta: number }[]; drops: { id: number; name: string; delta: number }[] };
-    const since = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    const items: { id: number; name: string; delta: number }[] = [];
-    for (const s of sortedStudents) {
-      const events = (ratingsByStudent[s.id] || []).filter((r) => r.scale_id === sortScale.id && r.recorded_at >= since);
-      if (events.length >= 2) {
-        const delta = events[events.length - 1].value - events[0].value;
-        items.push({ id: s.id, name: s.name, delta });
-      }
-    }
-    const top = [...items].sort((a, b) => b.delta - a.delta).slice(0, 5);
-    const drops = [...items].sort((a, b) => a.delta - b.delta).slice(0, 5);
-    return { top, drops };
-  }, [sortedStudents, ratingsByStudent, sortScale]);
+    return {
+      avgOverall,
+      avgParticipation,
+      avgHomework,
+      avgAttention,
+      totalWeeks: maxWeeks,
+      topStudents,
+      strugglingStudents,
+    };
+  }, [semesterData]);
 
-  // Alerts: scale drop by >=2 points within 7 days
-  const alerts = useMemo(() => {
-    const out: { when: number; student: string; scale: string; delta: number }[] = [];
-    const weekMs = 7 * 24 * 60 * 60 * 1000;
-    for (const st of sortedStudents) {
-      const events = (ratingsByStudent[st.id] || []).slice().sort((a,b)=>a.recorded_at-b.recorded_at);
-      // group by scale
-      const byScale = new Map<string, typeof events>();
-      for (const r of events) {
-        if (!byScale.has(r.scale_id)) byScale.set(r.scale_id, [] as any);
-        (byScale.get(r.scale_id) as any).push(r);
-      }
-      for (const [scaleId, evs] of byScale) {
-        for (let i = 1; i < evs.length; i++) {
-          const prev = evs[i-1];
-          const curr = evs[i];
-          if (curr.recorded_at - prev.recorded_at <= weekMs) {
-            const delta = curr.value - prev.value;
-            if (delta <= -2) {
-              const sc = scales.find(s=>s.id===scaleId);
-              out.push({ when: curr.recorded_at, student: st.name, scale: sc? `${tScaleLabels(sc,t).left} ↔ ${tScaleLabels(sc,t).right}`: scaleId, delta });
-            }
-          }
-        }
-      }
-    }
-    // latest first
-    return out.sort((a,b)=>b.when-a.when).slice(0, 50);
-  }, [sortedStudents, ratingsByStudent, scales, t]);
-
-  // Goals: up to 2 selected scales per class, show weekly progress % and trend
-  const goalsKey = `goals_${selectedClass || 'all'}`;
-  const [goal1, setGoal1] = useState<string>('');
-  const [goal2, setGoal2] = useState<string>('');
-  useEffect(() => {
-    const raw = localStorage.getItem(goalsKey);
-    if (raw) {
-      try { const { g1, g2 } = JSON.parse(raw); setGoal1(g1||''); setGoal2(g2||''); } catch {}
+  const handleSort = (col: 'name' | 'average' | 'weeks') => {
+    if (sortBy === col) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc');
     } else {
-      setGoal1(scales[0]?.id || ''); setGoal2(scales[1]?.id || '');
+      setSortBy(col);
+      setSortDir(col === 'name' ? 'asc' : 'desc');
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [goalsKey]);
-  useEffect(() => {
-    localStorage.setItem(goalsKey, JSON.stringify({ g1: goal1, g2: goal2 }));
-  }, [goal1, goal2, goalsKey]);
+  };
 
-  function weeklyProgress(scaleId?: string) {
-    if (!scaleId) return { pct: 0, delta: 0 };
-    const sc = scales.find(s=>s.id===scaleId);
-    if (!sc) return { pct: 0, delta: 0 };
-    const min = sc.min ?? -3; const max = sc.max ?? 3;
-    const now = Date.now();
-    const t0 = now - 7*24*60*60*1000; // last 7 days
-    const tPrev0 = now - 14*24*60*60*1000; // previous 7 days
-    const valsNow: number[] = [];
-    const valsPrev: number[] = [];
-    for (const st of sortedStudents) {
-      const evs = (ratingsByStudent[st.id] || []).filter(r=>r.scale_id===scaleId).sort((a,b)=>a.recorded_at-b.recorded_at);
-      const lastNow = [...evs].filter(r=>r.recorded_at>=t0).pop();
-      const lastPrev = [...evs].filter(r=>r.recorded_at>=tPrev0 && r.recorded_at<t0).pop();
-      if (lastNow) valsNow.push(computePercent(lastNow.value, min, max));
-      if (lastPrev) valsPrev.push(computePercent(lastPrev.value, min, max));
+  const getSortIcon = (col: 'name' | 'average' | 'weeks') => {
+    if (sortBy !== col) return '↕';
+    return sortDir === 'asc' ? '↑' : '↓';
+  };
+
+  const getGradeLabel = (pct: number) => {
+    if (pct >= 90) return { label: 'Excellent', color: 'text-emerald-600', bg: 'bg-emerald-100' };
+    if (pct >= 75) return { label: 'Good', color: 'text-blue-600', bg: 'bg-blue-100' };
+    if (pct >= 60) return { label: 'Average', color: 'text-yellow-600', bg: 'bg-yellow-100' };
+    if (pct >= 40) return { label: 'Needs Work', color: 'text-orange-600', bg: 'bg-orange-100' };
+    return { label: 'Struggling', color: 'text-red-600', bg: 'bg-red-100' };
+  };
+
+  // PDF Export
+  const exportToPDF = () => {
+    if (!gradeScale || sortedStudents.length === 0) return;
+
+    const today = new Date().toLocaleDateString('ar-SA');
+
+    // Open a new window and write content directly to preserve UTF-8
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      alert('Please allow popups for this site');
+      return;
     }
-    const avg = (arr:number[]) => arr.length? arr.reduce((a,b)=>a+b,0)/arr.length : 0;
-    const nowPct = avg(valsNow);
-    const prevPct = avg(valsPrev);
-    return { pct: nowPct, delta: nowPct - prevPct };
-  }
 
-  const goal1Stats = useMemo(()=>weeklyProgress(goal1), [goal1, sortedStudents, ratingsByStudent, scales]);
-  const goal2Stats = useMemo(()=>weeklyProgress(goal2), [goal2, sortedStudents, ratingsByStudent, scales]);
+    printWindow.document.write(`<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>تقرير الفصل - ${selectedClass}</title>
+  <style>
+    * { font-family: 'Segoe UI', Tahoma, Arial, 'Noto Sans Arabic', 'Arial Unicode MS', sans-serif; }
+    body { margin: 20px; direction: rtl; unicode-bidi: embed; }
+    h1 { color: #333; border-bottom: 2px solid #333; padding-bottom: 10px; text-align: right; }
+    .meta { color: #666; margin-bottom: 20px; text-align: right; }
+    table { width: 100%; border-collapse: collapse; margin-top: 20px; direction: rtl; }
+    th, td { border: 1px solid #ddd; padding: 8px 12px; text-align: right; }
+    th { background-color: #f5f5f5; font-weight: bold; }
+    tr:nth-child(even) { background-color: #fafafa; }
+    .grade-excellent { color: #059669; font-weight: bold; }
+    .grade-good { color: #2563eb; font-weight: bold; }
+    .grade-average { color: #d97706; font-weight: bold; }
+    .grade-poor { color: #dc2626; font-weight: bold; }
+    .summary { margin-top: 30px; padding: 15px; background: #f5f5f5; border-radius: 8px; text-align: right; }
+    .summary h3 { margin-top: 0; }
+    .center { text-align: center; }
+    @media print { body { margin: 10px; } }
+  </style>
+</head>
+<body>
+  <h1>تقرير الفصل الدراسي: ${selectedClass}</h1>
+  <div class="meta">
+    التاريخ: ${today} | عدد الطلاب: ${sortedStudents.length} | الأسابيع المسجلة: ${classStats.totalWeeks}
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>اسم الطالب</th>
+        <th class="center">المشاركة</th>
+        <th class="center">الواجب</th>
+        <th class="center">الانتباه</th>
+        <th class="center">المعدل %</th>
+        <th class="center">الدرجة</th>
+        <th class="center">الأسابيع</th>
+        <th class="center">الغياب</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${sortedStudents.map(st => {
+        const hasData = st.semesterAvg.totalWeeks > 0;
+        const letterGrade = hasData ? convertPercentToGrade(st.semesterAvg.overall, gradeScale.thresholds) : '—';
+        const gradeClass = st.semesterAvg.overall >= 75 ? 'grade-excellent' :
+                          st.semesterAvg.overall >= 60 ? 'grade-good' :
+                          st.semesterAvg.overall >= 40 ? 'grade-average' : 'grade-poor';
+        return `
+          <tr>
+            <td class="center">${st.number}</td>
+            <td>${st.name}</td>
+            <td class="center">${hasData ? st.semesterAvg.participation.toFixed(1) : '—'}</td>
+            <td class="center">${hasData ? st.semesterAvg.homework.toFixed(1) : '—'}</td>
+            <td class="center">${hasData ? st.semesterAvg.attention.toFixed(1) : '—'}</td>
+            <td class="center">${hasData ? st.semesterAvg.overall.toFixed(0) + '%' : '—'}</td>
+            <td class="center ${gradeClass}">${letterGrade}</td>
+            <td class="center">${st.semesterAvg.totalWeeks}</td>
+            <td class="center">${st.absenceCount}</td>
+          </tr>
+        `;
+      }).join('')}
+    </tbody>
+  </table>
+
+  <div class="summary">
+    <h3>ملخص الصف</h3>
+    <p><strong>معدل الصف:</strong> ${classStats.avgOverall.toFixed(0)}%</p>
+    <p><strong>معدل المشاركة:</strong> ${classStats.avgParticipation.toFixed(1)}/3</p>
+    <p><strong>معدل الواجب:</strong> ${classStats.avgHomework.toFixed(1)}/3</p>
+    <p><strong>معدل الانتباه:</strong> ${classStats.avgAttention.toFixed(1)}/3</p>
+  </div>
+
+  <script>
+    window.onload = function() {
+      setTimeout(function() { window.print(); }, 500);
+    };
+  </script>
+</body>
+</html>`);
+    printWindow.document.close();
+  };
 
   return (
     <section className="space-y-4">
-      <h1 className="text-2xl font-semibold">{t('nav.dashboard')}</h1>
+      <h1 className="text-2xl font-semibold">{t('nav.dashboard')} - Semester Overview</h1>
 
       <div className="flex items-center gap-3 flex-wrap">
         <label className="text-sm text-gray-700">{t('common.class')}
-          <select value={selectedClass} onChange={(e)=>setSelectedClass(e.target.value)} className="ml-2 rounded border px-2 py-1 text-sm">
-            {classes.map((c)=>(<option key={c} value={c}>{c}</option>))}
+          <select value={selectedClass} onChange={(e) => setSelectedClass(e.target.value)} className="ml-2 rounded border px-2 py-1 text-sm">
+            {classes.map((c) => (<option key={c} value={c}>{c}</option>))}
           </select>
         </label>
-        <label className="text-sm text-gray-700">{t('common.scale')}
-          <select value={selectedScaleId} onChange={(e)=>setSelectedScaleId(e.target.value)} className="ml-2 rounded border px-2 py-1 text-sm">
-            {scales.map((s)=>{ const l=tScaleLabels(s, t); return (<option key={s.id} value={s.id}>{l.left} ↔ {l.right}</option>); })}
-          </select>
-        </label>
-        <div className="flex items-center gap-2">
-          <button className="rounded-md border px-2 py-1 text-sm hover:bg-gray-50" onClick={()=>applyBatch(+1)} disabled={!selectedScaleId || selectedIds.size===0}>+1</button>
-          <button className="rounded-md border px-2 py-1 text-sm hover:bg-gray-50" onClick={()=>applyBatch(-1)} disabled={!selectedScaleId || selectedIds.size===0}>-1</button>
-          {lastBatch && <button className="rounded-md border px-2 py-1 text-sm hover:bg-gray-50" onClick={undoBatch}>Undo</button>}
-        </div>
-        <div className="ml-auto flex items-center gap-2 text-xs">
-          <span>{t('common.legend')}:</span>
-          <div className="h-3 w-40 rounded" style={{ background: 'linear-gradient(90deg, hsl(220 80% 50%), hsl(0 80% 50%))' }} />
-          <span>0%</span>
-          <span>100%</span>
-        </div>
-        {selectedClass && (
-          <button className="rounded-md bg-brand px-3 py-1.5 text-sm text-white hover:bg-brand-dark" onClick={()=>generateClassSummaryPDF(selectedClass)}>{t('common.download_pdf')}</button>
+        <span className="text-sm text-gray-500">{semesterData.size} students</span>
+        {classStats.totalWeeks > 0 && (
+          <span className="text-sm text-gray-500">• {classStats.totalWeeks} weeks recorded</span>
         )}
+        <button
+          type="button"
+          onClick={exportToPDF}
+          disabled={loading || sortedStudents.length === 0}
+          className="ml-auto px-4 py-1.5 text-sm rounded-md bg-brand text-white hover:bg-brand-dark disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+        >
+          📄 Export PDF Report
+        </button>
       </div>
 
-      {sortScale && (
-        <div className="rounded-md border bg-white shadow-sm p-3">
-          <div className="mb-2 text-sm text-gray-700">{t('dashboard.class_average')} ({tScaleLabels(sortScale, t).left} ↔ {tScaleLabels(sortScale, t).right})</div>
-          <div className="h-3 w-full rounded bg-gray-100 overflow-hidden">
-            <div className="h-full" style={{ width: `${classAveragePct.toFixed(0)}%`, background: hueForPercent(classAveragePct) }} />
+      {loading ? (
+        <div className="text-gray-600">{t('common.loading')}</div>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-[1fr_20rem] gap-4">
+          {/* Student List */}
+          <div className="rounded-md border bg-white shadow-sm overflow-auto max-h-[600px]">
+            <table className="min-w-full text-sm">
+              <thead className="bg-gray-50 sticky top-0">
+                <tr>
+                  <th
+                    className="text-left px-4 py-2 font-medium text-gray-700 cursor-pointer hover:bg-gray-100"
+                    onClick={() => handleSort('name')}
+                  >
+                    Student {getSortIcon('name')}
+                  </th>
+                  <th className="text-center px-2 py-2 font-medium text-gray-700">🙋</th>
+                  <th className="text-center px-2 py-2 font-medium text-gray-700">📝</th>
+                  <th className="text-center px-2 py-2 font-medium text-gray-700">👀</th>
+                  <th
+                    className="text-center px-4 py-2 font-medium text-gray-700 cursor-pointer hover:bg-gray-100"
+                    onClick={() => handleSort('average')}
+                  >
+                    Avg {getSortIcon('average')}
+                  </th>
+                  <th className="text-center px-2 py-2 font-medium text-gray-700">Grade</th>
+                  <th
+                    className="text-center px-2 py-2 font-medium text-gray-700 cursor-pointer hover:bg-gray-100"
+                    onClick={() => handleSort('weeks')}
+                  >
+                    Weeks {getSortIcon('weeks')}
+                  </th>
+                  <th className="text-center px-2 py-2 font-medium text-gray-700">Absent</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedStudents.map((st) => {
+                  const gradeInfo = getGradeLabel(st.semesterAvg.overall);
+                  const hasData = st.semesterAvg.totalWeeks > 0;
+                  const letterGrade = gradeScale && hasData
+                    ? convertPercentToGrade(st.semesterAvg.overall, gradeScale.thresholds)
+                    : '—';
+                  return (
+                    <tr key={st.id} className={`border-t hover:bg-gray-50 ${!hasData ? 'opacity-50' : ''}`}>
+                      <td className="px-4 py-2">
+                        <Link to={`/student/${st.id}`} className="text-brand hover:underline">
+                          #{st.number} — {st.name}
+                        </Link>
+                      </td>
+                      <td className="px-2 py-2 text-center">
+                        {hasData ? (
+                          <span className="text-blue-600 font-medium">{st.semesterAvg.participation.toFixed(1)}</span>
+                        ) : '—'}
+                      </td>
+                      <td className="px-2 py-2 text-center">
+                        {hasData ? (
+                          <span className="text-green-600 font-medium">{st.semesterAvg.homework.toFixed(1)}</span>
+                        ) : '—'}
+                      </td>
+                      <td className="px-2 py-2 text-center">
+                        {hasData ? (
+                          <span className="text-purple-600 font-medium">{st.semesterAvg.attention.toFixed(1)}</span>
+                        ) : '—'}
+                      </td>
+                      <td className="px-2 py-2 text-center">
+                        {hasData ? (
+                          <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${gradeInfo.color} ${gradeInfo.bg}`}>
+                            {st.semesterAvg.overall.toFixed(0)}%
+                          </span>
+                        ) : (
+                          <span className="text-gray-400">—</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-2 text-center">
+                        <span className={`inline-block px-2 py-0.5 rounded text-sm font-bold ${gradeInfo.color}`}>
+                          {letterGrade}
+                        </span>
+                      </td>
+                      <td className="px-2 py-2 text-center text-gray-600">
+                        {st.semesterAvg.totalWeeks}
+                      </td>
+                      <td className="px-2 py-2 text-center">
+                        {st.absenceCount > 0 ? (
+                          <span className="text-orange-600 font-medium">{st.absenceCount}</span>
+                        ) : (
+                          <span className="text-gray-400">0</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
-        </div>
-      )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_18rem] gap-4">
-        <div className="rounded-md border bg-white shadow-sm overflow-auto">
-          <div className="min-w-[640px]">
-            <div className="sticky top-0 z-10 bg-white border-b">
-              <div className="grid" style={{ gridTemplateColumns: `2.5rem 16rem repeat(${scales.length}, minmax(3rem, 1fr))` }}>
-                <div className="px-3 py-2 text-sm font-medium text-gray-700">
-                  <input type="checkbox" aria-label="Select all" onChange={(e)=> e.target.checked ? selectAll() : clearSelection()} />
+          {/* Sidebar Stats */}
+          <div className="space-y-4">
+            {/* Class Semester Summary */}
+            <div className="rounded-md border bg-white shadow-sm p-3">
+              <div className="text-sm font-medium mb-2">Class Semester Average</div>
+              {classStats.totalWeeks === 0 ? (
+                <div className="text-sm text-gray-500">No data recorded yet</div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-gray-600">Overall</span>
+                    <span className={`text-2xl font-bold ${getGradeLabel(classStats.avgOverall).color}`}>
+                      {classStats.avgOverall.toFixed(0)}%
+                    </span>
+                  </div>
+                  <div className="h-3 w-full rounded-full bg-gray-100 overflow-hidden">
+                    <div
+                      className={`h-full ${
+                        classStats.avgOverall >= 75 ? 'bg-emerald-500' :
+                        classStats.avgOverall >= 50 ? 'bg-yellow-500' : 'bg-red-500'
+                      }`}
+                      style={{ width: `${Math.min(100, classStats.avgOverall)}%` }}
+                    />
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div className="text-center p-2 rounded bg-blue-50">
+                      <div className="text-blue-600 font-medium">🙋</div>
+                      <div className="text-gray-600">Participation</div>
+                      <div className="font-bold text-blue-700">{classStats.avgParticipation.toFixed(1)}/3</div>
+                    </div>
+                    <div className="text-center p-2 rounded bg-green-50">
+                      <div className="text-green-600 font-medium">📝</div>
+                      <div className="text-gray-600">Homework</div>
+                      <div className="font-bold text-green-700">{classStats.avgHomework.toFixed(1)}/3</div>
+                    </div>
+                    <div className="text-center p-2 rounded bg-purple-50">
+                      <div className="text-purple-600 font-medium">👀</div>
+                      <div className="text-gray-600">Attention</div>
+                      <div className="font-bold text-purple-700">{classStats.avgAttention.toFixed(1)}/3</div>
+                    </div>
+                  </div>
                 </div>
-                <div className="px-3 py-2 text-sm font-medium text-gray-700">Student</div>
-                {scales.map((sc) => { const l=tScaleLabels(sc,t); return (
-                  <div key={sc.id} className="px-2 py-2 text-[11px] text-gray-600 text-center truncate">{l.left} ↔ {l.right}</div>
-                );})}
-              </div>
+              )}
             </div>
-            <div>
-              {sortedStudents.map((st) => (
-                <div key={st.id} className="grid border-t items-center" style={{ gridTemplateColumns: `2.5rem 16rem repeat(${scales.length}, minmax(3rem, 1fr))` }}>
-                  <div className="px-3 py-2"><input type="checkbox" checked={selectedIds.has(st.id)} onChange={()=>toggleSelect(st.id)} /></div>
-                  <div className="px-3 py-2 text-sm whitespace-nowrap overflow-hidden text-ellipsis">{st.class_name} • #{st.number} — {st.name}</div>
-                  {scales.map((sc) => {
-                    const val = getRatingValue(st.id, sc.id);
-                    const min = sc.min ?? -3;
-                    const max = sc.max ?? 3;
-                    const pct = val == null ? null : computePercent(val, min, max);
-                    const bg = pct == null ? '#e5e7eb' : hueForPercent(pct);
+
+            {/* Top Performers */}
+            {classStats.topStudents.length > 0 && (
+              <div className="rounded-md border bg-white shadow-sm p-3">
+                <div className="text-sm font-medium mb-2 flex items-center gap-1">
+                  <span>🏆</span> Top Performers
+                </div>
+                <ul className="space-y-2">
+                  {classStats.topStudents.map((s, i) => (
+                    <li key={s.id} className="flex items-center justify-between text-sm">
+                      <span className="flex items-center gap-2">
+                        <span className={`w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold ${
+                          i === 0 ? 'bg-amber-100 text-amber-700' :
+                          i === 1 ? 'bg-gray-200 text-gray-700' :
+                          i === 2 ? 'bg-orange-100 text-orange-700' :
+                          'bg-gray-100 text-gray-600'
+                        }`}>
+                          {i + 1}
+                        </span>
+                        <Link to={`/student/${s.id}`} className="hover:text-brand truncate max-w-[120px]">
+                          {s.name}
+                        </Link>
+                      </span>
+                      <span className={`font-medium ${getGradeLabel(s.semesterAvg.overall).color}`}>
+                        {s.semesterAvg.overall.toFixed(0)}%
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Struggling Students */}
+            {classStats.strugglingStudents.length > 0 && (
+              <div className="rounded-md border border-red-200 bg-red-50 shadow-sm p-3">
+                <div className="text-sm font-medium mb-2 flex items-center gap-1 text-red-700">
+                  <span>⚠️</span> Need Attention
+                </div>
+                <ul className="space-y-2">
+                  {classStats.strugglingStudents.map((s) => (
+                    <li key={s.id} className="flex items-center justify-between text-sm">
+                      <Link to={`/student/${s.id}`} className="hover:text-red-800 text-red-700 truncate max-w-[140px]">
+                        {s.name}
+                      </Link>
+                      <span className="font-medium text-red-600">
+                        {s.semesterAvg.overall.toFixed(0)}%
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Grade Distribution */}
+            {classStats.totalWeeks > 0 && (
+              <div className="rounded-md border bg-white shadow-sm p-3">
+                <div className="text-sm font-medium mb-2">Grade Distribution</div>
+                <div className="space-y-1 text-xs">
+                  {[
+                    { label: 'Excellent (90%+)', min: 90, color: 'bg-emerald-500' },
+                    { label: 'Good (75-89%)', min: 75, max: 90, color: 'bg-blue-500' },
+                    { label: 'Average (60-74%)', min: 60, max: 75, color: 'bg-yellow-500' },
+                    { label: 'Needs Work (40-59%)', min: 40, max: 60, color: 'bg-orange-500' },
+                    { label: 'Struggling (<40%)', max: 40, color: 'bg-red-500' },
+                  ].map(({ label, min, max, color }) => {
+                    const count = sortedStudents.filter(s => {
+                      if (s.semesterAvg.totalWeeks === 0) return false;
+                      const pct = s.semesterAvg.overall;
+                      if (min !== undefined && max !== undefined) return pct >= min && pct < max;
+                      if (min !== undefined) return pct >= min;
+                      if (max !== undefined) return pct < max;
+                      return false;
+                    }).length;
+                    const pct = sortedStudents.filter(s => s.semesterAvg.totalWeeks > 0).length;
+                    const width = pct > 0 ? (count / pct) * 100 : 0;
                     return (
-                      <div key={sc.id} className="px-2 py-2 text-center text-[11px]" style={{ background: `linear-gradient(${bg}, ${bg})`, color: '#1118270a' }}>
-                        <span className="text-gray-900">{pct == null ? '—' : `${pct.toFixed(0)}%`}</span>
+                      <div key={label} className="flex items-center gap-2">
+                        <span className="w-28 text-gray-600">{label}</span>
+                        <div className="flex-1 h-4 bg-gray-100 rounded overflow-hidden">
+                          <div className={`h-full ${color}`} style={{ width: `${width}%` }} />
+                        </div>
+                        <span className="w-8 text-right font-medium">{count}</span>
                       </div>
                     );
                   })}
                 </div>
-              ))}
-            </div>
+              </div>
+            )}
           </div>
         </div>
-
-        <div className="space-y-4">
-          <QuickGroups
-            className={selectedClass}
-            students={sortedStudents}
-            selected={selectedIds}
-            onSelectSet={setSelectedIds}
-          />
-          <div className="rounded-md border bg-white shadow-sm p-3">
-            <div className="text-sm font-medium mb-2">Goals</div>
-            <div className="space-y-2 text-sm">
-              <div className="flex items-center gap-2">
-                <span className="text-gray-700">1.</span>
-                <select value={goal1} onChange={(e)=>setGoal1(e.target.value)} className="rounded border px-2 py-1 text-sm flex-1">
-                  <option value="">—</option>
-                  {scales.map(s=> (<option key={s.id} value={s.id}>{tScaleLabels(s,t).left} ↔ {tScaleLabels(s,t).right}</option>))}
-                </select>
-                <Trend pct={goal1Stats.pct} delta={goal1Stats.delta} />
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-gray-700">2.</span>
-                <select value={goal2} onChange={(e)=>setGoal2(e.target.value)} className="rounded border px-2 py-1 text-sm flex-1">
-                  <option value="">—</option>
-                  {scales.map(s=> (<option key={s.id} value={s.id}>{tScaleLabels(s,t).left} ↔ {tScaleLabels(s,t).right}</option>))}
-                </select>
-                <Trend pct={goal2Stats.pct} delta={goal2Stats.delta} />
-              </div>
-            </div>
-          </div>
-          <div className="rounded-md border bg-white shadow-sm p-3">
-            <div className="text-sm font-medium mb-2">Top improvements (7 days)</div>
-            <ul className="space-y-1 text-sm">
-              {improvements.top.length === 0 && <li className="text-gray-600">No data</li>}
-              {improvements.top.map((x) => (
-                <li key={x.id} className="flex items-center justify-between">
-                  <span className="truncate mr-2">{x.name}</span>
-                  <span className="text-emerald-700">+{x.delta.toFixed(1)}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-          <div className="rounded-md border bg-white shadow-sm p-3">
-            <div className="text-sm font-medium mb-2">Largest drops (7 days)</div>
-            <ul className="space-y-1 text-sm">
-              {improvements.drops.length === 0 && <li className="text-gray-600">No data</li>}
-              {improvements.drops.map((x) => (
-                <li key={x.id} className="flex items-center justify-between">
-                  <span className="truncate mr-2">{x.name}</span>
-                  <span className="text-red-700">{x.delta.toFixed(1)}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-          <div className="rounded-md border bg-white shadow-sm p-3">
-            <div className="text-sm font-medium mb-2">Alerts</div>
-            <ul className="space-y-1 text-sm max-h-64 overflow-auto">
-              {alerts.length === 0 && <li className="text-gray-600">No alerts</li>}
-              {alerts.map((a, idx) => (
-                <li key={idx} className="flex items-center justify-between">
-                  <div className="truncate mr-2">
-                    <span className="font-medium">{a.student}</span>
-                    <span className="mx-1">—</span>
-                    <span className="text-gray-700">{a.scale}</span>
-                    <span className="mx-1 text-red-700">{a.delta.toFixed(1)}</span>
-                  </div>
-                  <span className="text-xs text-gray-600">{new Date(a.when).toLocaleString()}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </div>
-      </div>
+      )}
     </section>
-  );
-}
-
-function Trend({ pct, delta }: { pct: number; delta: number }) {
-  const up = delta >= 0.01;
-  const down = delta <= -0.01;
-  return (
-    <span className={`text-xs px-2 py-0.5 rounded-full border ${up? 'bg-emerald-50 border-emerald-300 text-emerald-800': (down? 'bg-red-50 border-red-300 text-red-800':'bg-gray-50 border-gray-300 text-gray-700')}`}>
-      {pct.toFixed(0)}% {up? '▲': (down? '▼':'•')} {Math.abs(delta).toFixed(1)}
-    </span>
-  );
-}
-
-function QuickGroups({ className, students, selected, onSelectSet }: { className: string; students: { id: number; name: string }[]; selected: Set<number>; onSelectSet: (s: Set<number>) => void }) {
-  const key = `groups_${className || 'all'}`;
-  const [groups, setGroups] = useState<Array<{ name: string; ids: number[] }>>([]);
-  const [groupName, setGroupName] = useState('Team A');
-  useEffect(() => {
-    const raw = localStorage.getItem(key);
-    setGroups(raw ? JSON.parse(raw) : []);
-  }, [key]);
-  const save = (gs: Array<{ name: string; ids: number[] }>) => {
-    setGroups(gs);
-    localStorage.setItem(key, JSON.stringify(gs));
-  };
-  const saveCurrent = () => {
-    const ids = Array.from(selected);
-    if (!ids.length || !groupName.trim()) return;
-    const gs = groups.filter(g=>g.name!==groupName.trim());
-    gs.push({ name: groupName.trim(), ids });
-    save(gs);
-  };
-  const selectGroup = (ids: number[]) => { onSelectSet(new Set(ids)); };
-  const removeGroup = (name: string) => save(groups.filter(g=>g.name!==name));
-  return (
-    <div className="rounded-md border bg-white shadow-sm p-3">
-      <div className="text-sm font-medium mb-2">Quick groups</div>
-      <div className="flex items-center gap-2 mb-2">
-        <input value={groupName} onChange={(e)=>setGroupName(e.target.value)} className="rounded border px-2 py-1 text-sm" placeholder="Group name" />
-        <button className="rounded-md border px-2 py-1 text-sm hover:bg-gray-50" onClick={saveCurrent}>Save selection</button>
-      </div>
-      <ul className="space-y-1 text-sm">
-        {groups.length===0 && <li className="text-gray-600">No groups</li>}
-        {groups.map(g => (
-          <li key={g.name} className="flex items-center justify-between">
-            <span className="truncate mr-2">{g.name} <span className="text-xs text-gray-600">({g.ids.length})</span></span>
-            <div className="flex items-center gap-2">
-              <button className="rounded-md border px-2 py-1 text-xs hover:bg-gray-50" onClick={()=>selectGroup(g.ids)}>Select</button>
-              <button className="rounded-md border px-2 py-1 text-xs hover:bg-red-50 text-red-700" onClick={()=>removeGroup(g.name)}>Delete</button>
-            </div>
-          </li>
-        ))}
-      </ul>
-    </div>
   );
 }
